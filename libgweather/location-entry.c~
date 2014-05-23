@@ -84,7 +84,6 @@ static gboolean match_selected (GtkEntryCompletion *completion,
 				GtkTreeModel       *model,
 				GtkTreeIter        *iter,
 				gpointer            entry);
-static void _no_suggestions (GtkEntryCompletion *completion, GWeatherLocationEntry *entry);
 static void     entry_changed (GWeatherLocationEntry *entry);
 
 static void
