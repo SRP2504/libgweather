@@ -44,6 +44,7 @@ struct _GWeatherLocationEntryPrivate {
     GWeatherLocation *top;
     gboolean          custom_text;
     GCancellable     *cancellable;
+    GtkTreeModel     *model;
 };
 
 G_DEFINE_TYPE (GWeatherLocationEntry, gweather_location_entry, GTK_TYPE_SEARCH_ENTRY)
@@ -265,6 +266,8 @@ entry_changed (GWeatherLocationEntry *entry)
     const gchar *text;
 
     text = gtk_entry_get_text (GTK_ENTRY (entry));
+
+    gtk_entry_completion_set_model (gtk_entry_get_completion (GTK_ENTRY (entry)), entry->priv->model);
 
     if (text && *text)
 	entry->priv->custom_text = TRUE;
@@ -583,7 +586,7 @@ gweather_location_entry_build_model (GWeatherLocationEntry *entry,
     fill_location_entry_model (store, entry->priv->top, NULL, NULL);
     gtk_entry_completion_set_model (gtk_entry_get_completion (GTK_ENTRY (entry)),
 				    GTK_TREE_MODEL (store));
-    g_object_unref (store);
+    entry->priv->model = GTK_TREE_MODEL (store);
 }
 
 static char *
@@ -678,19 +681,39 @@ match_selected (GtkEntryCompletion *completion,
     return TRUE;
 }
 
+struct ArgData {
+    GtkEntryCompletion    *completion;
+    GSimpleAsyncResult    *simple;
+};
+
+typedef struct ArgData ArgData;
+
+static gboolean
+new_matcher (GtkEntryCompletion *completion, const char *key,
+             GtkTreeIter        *iter,       gpointer    user_data)
+{
+    return TRUE;
+}
+
 static void
 _got_places (GObject      *source_object,
              GAsyncResult *result,
              gpointer      user_data)
 {
-    GSimpleAsyncResult *simple = user_data;
+    ArgData *data = user_data;
+    GSimpleAsyncResult *simple = data->simple;
 
     GList *places;
     GError *error = NULL;
     places = geocode_forward_search_finish (GEOCODE_FORWARD (source_object), result, &error);
     if (places == NULL) {
+        if (GTK_IS_ENTRY_COMPLETION (data->completion)) {
+            gtk_entry_completion_set_match_func (data->completion, matcher, NULL, NULL);
+            gtk_entry_completion_delete_action (data->completion, 0);
+        }
         g_simple_async_result_set_from_error (simple, error);
         g_object_unref (simple);
+        g_slice_free (ArgData, data);
         return;
     }
     g_simple_async_result_set_op_res_gpointer (simple, places, (GDestroyNotify)g_list_free);
@@ -720,11 +743,18 @@ _no_suggestions_finish (GAsyncResult *result, GError **error)
 }
 
 static void
-print (gpointer data, gpointer user_data)
+fill_store (gpointer data, gpointer user_data)
 {
     GeocodePlace *place = GEOCODE_PLACE (data);
     GeocodeLocation *loc = geocode_place_get_location (place);
-    printf ("%s\n", geocode_location_get_description (loc));
+    GtkTreeIter iter;
+
+    gtk_tree_store_append (user_data, &iter, NULL);
+    gtk_tree_store_set (user_data, &iter,
+                        GWEATHER_LOCATION_ENTRY_COL_LOCATION, NULL,
+                        GWEATHER_LOCATION_ENTRY_COL_DISPLAY_NAME, geocode_location_get_description (loc),
+                        GWEATHER_LOCATION_ENTRY_COL_COMPARE_NAME, geocode_location_get_description (loc),
+                        -1);
 }
 
 static void
@@ -732,11 +762,25 @@ _got_list (GObject      *source_object,
            GAsyncResult *result,
            gpointer      user_data)
 {
+    ArgData *data = user_data;
     GError *error = NULL;
     GList *places = _no_suggestions_finish (result, &error);
+
     if (places != NULL) {
-        g_list_foreach (places, print, NULL);
+        GtkTreeStore *store = NULL;
+        store = gtk_tree_store_new (4, G_TYPE_STRING, GWEATHER_TYPE_LOCATION, G_TYPE_STRING, G_TYPE_STRING);
+        g_list_foreach (places, fill_store, store);
+        if (GTK_IS_ENTRY_COMPLETION (data->completion)) {
+            gtk_entry_completion_set_model (data->completion, GTK_TREE_MODEL(store));
+        }
+        g_object_unref (store);
     }
+
+    if (GTK_IS_ENTRY_COMPLETION (data->completion)) {
+        gtk_entry_completion_delete_action (data->completion, 0);
+        gtk_entry_completion_set_match_func (data->completion, matcher, NULL, NULL);
+    }
+    g_slice_free (ArgData, data);
 }
 
 static void
@@ -745,17 +789,26 @@ _no_suggestions (GtkEntryCompletion *completion, GWeatherLocationEntry *entry) {
         g_cancellable_cancel (entry->priv->cancellable);
     }
 
+    gtk_entry_completion_set_match_func (completion, new_matcher, NULL, NULL);
+    gtk_entry_completion_insert_action_text (completion, 0, "Loading...");
+
     const gchar *key = gtk_entry_get_text(GTK_ENTRY (entry));
-    GeocodeForward *forward = geocode_forward_new_for_string(key);
 
     GCancellable *cancellable = g_cancellable_new ();
     entry->priv->cancellable = cancellable;
 
+    ArgData *data = g_slice_new0 (ArgData);
+    data->completion = completion;
+    data->simple = NULL;
+
     GSimpleAsyncResult *simple;
-    simple = g_simple_async_result_new (NULL, _got_list, entry, _no_suggestions);
+    simple = g_simple_async_result_new (NULL, _got_list, data, _no_suggestions);
     g_simple_async_result_set_check_cancellable (simple, entry->priv->cancellable);
 
-    geocode_forward_search_async (forward, entry->priv->cancellable, _got_places, simple);
+    data->simple = simple;
+
+    GeocodeForward *forward = geocode_forward_new_for_string(key);
+    geocode_forward_search_async (forward, entry->priv->cancellable, _got_places, data);
 }
 
 /**
