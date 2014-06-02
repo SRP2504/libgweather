@@ -683,7 +683,17 @@ match_selected (GtkEntryCompletion *completion,
 		GtkTreeIter        *iter,
 		gpointer            entry)
 {
-    set_location_internal (entry, model, iter, NULL);
+    if (gtk_entry_completion_get_model (gtk_entry_get_completion ((GtkEntry *)entry)) != ((GWeatherLocationEntry *)entry)->priv->model) {
+        GeocodeLocation *loc;
+        gtk_tree_model_get (model, iter,
+                            GWEATHER_LOCATION_ENTRY_COL_LOCATION, &loc,
+                            -1);
+        GWeatherLocation *location;
+        location = gweather_location_find_nearest_city (NULL, geocode_location_get_latitude (loc), geocode_location_get_longitude (loc));
+        set_location_internal (entry, model, NULL, location);
+    } else {
+        set_location_internal (entry, model, iter, NULL);
+    }
     return TRUE;
 }
 
